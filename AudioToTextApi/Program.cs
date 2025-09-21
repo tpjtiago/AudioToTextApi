@@ -1,6 +1,10 @@
 using AudioToTextApi.Background;
 using AudioToTextApi.Data;
+using Google.Cloud.PubSub.V1;
 using Microsoft.EntityFrameworkCore;
+using Google.Cloud.PubSub.V1;
+using Google.Cloud.Storage.V1;
+using Microsoft.Extensions.DependencyInjection;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -14,6 +18,17 @@ builder.Services.AddHostedService<AudioWorker>();
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
 
 builder.Services.AddDbContext<AppDbContext>(x => x.UseSqlServer(connectionString));
+// PublisherClient Singleton
+builder.Services.AddSingleton<PublisherClient>(sp =>
+{
+    var config = sp.GetRequiredService<IConfiguration>();
+    var projectId = config["Gcp:ProjectId"];
+    var topicId = config["Gcp:PubSubTopic"];
+    return PublisherClient.Create(TopicName.FromProjectTopic(projectId, topicId));
+});
+
+builder.Services.AddSingleton(sp => StorageClient.Create());
+
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.

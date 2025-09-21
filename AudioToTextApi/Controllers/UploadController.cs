@@ -2,6 +2,8 @@
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json;
 using Google.Cloud.PubSub.V1;
+using Google.Cloud.Storage.V1;
+using System.Diagnostics;
 
 namespace AudioToTextApi.Controllers
 {
@@ -10,7 +12,15 @@ namespace AudioToTextApi.Controllers
     public class UploadController : ControllerBase
     {
         private readonly IConfiguration _config;
-        public UploadController(IConfiguration config) => _config = config;
+        private readonly PublisherClient _publisher;
+        private readonly StorageClient _storage;
+
+        public UploadController(IConfiguration config, PublisherClient publisher, StorageClient storage)
+        {
+            _config = config;
+            _publisher = publisher;
+            _storage = storage;
+        }
 
         [HttpPost]
         public async Task<IActionResult> Upload(IFormFile file)
@@ -19,36 +29,58 @@ namespace AudioToTextApi.Controllers
                 return BadRequest("Nenhum arquivo enviado.");
 
             var bucket = _config["Gcs:Bucket"];
-            var projectId = _config["Gcp:ProjectId"];
-            var topicId = _config["Gcp:PubSubTopic"];
+            var objectName = Guid.NewGuid() + ".flac";
 
-            // 1. Salvar no GCS
-            var storage = await Google.Cloud.Storage.V1.StorageClient.CreateAsync();
-            var objectName = Guid.NewGuid() + Path.GetExtension(file.FileName);
+            // --- Caminhos temporários ---
+            var tempInput = Path.GetTempFileName() + Path.GetExtension(file.FileName);
+            var tempOutput = Path.GetTempFileName() + ".wav";
 
-            using (var stream = file.OpenReadStream())
+            // --- Salva upload temporário ---
+            using (var fs = new FileStream(tempInput, FileMode.Create))
             {
-                await storage.UploadObjectAsync(bucket, objectName, null, stream);
+                await file.CopyToAsync(fs);
             }
+
+
+            var ffmpeg = new ProcessStartInfo
+            {
+                FileName = @"C:\ffmpeg\bin\ffmpeg.exe",
+                Arguments = $"-y -i \"{tempInput}\" -ar 16000 -ac 1 -f wav \"{tempOutput}\"",
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using (var process = Process.Start(ffmpeg))
+            {
+                string stderr = await process.StandardError.ReadToEndAsync();
+                await process.WaitForExitAsync();
+
+                if (process.ExitCode != 0)
+                {
+                    return StatusCode(500, $"Erro na conversão FFmpeg: {stderr}");
+                }
+            }
+
+            // --- Upload para GCS ---
+            using (var stream = System.IO.File.OpenRead(tempOutput))
+            {
+                await _storage.UploadObjectAsync(bucket, objectName, null, stream);
+            }
+
+            // --- Limpeza ---
+            System.IO.File.Delete(tempInput);
+            System.IO.File.Delete(tempOutput);
 
             var filePath = $"gs://{bucket}/{objectName}";
             var jobId = Guid.NewGuid().ToString();
 
-            // 2. Publicar no Pub/Sub
-            var publisher = await PublisherClient.CreateAsync(
-                TopicName.FromProjectTopic(projectId, topicId)
-            );
-
-            var message = new
-            {
-                JobId = jobId,
-                FilePath = filePath
-            };
-
+            // --- Publicação no Pub/Sub ---
+            var message = new { JobId = jobId, FilePath = filePath };
             string json = JsonConvert.SerializeObject(message);
-            await publisher.PublishAsync(ByteString.CopyFromUtf8(json));
+            await _publisher.PublishAsync(ByteString.CopyFromUtf8(json));
 
-            return Ok(new { JobId = jobId, Status = "processing" });
+            return Ok(new { JobId = jobId, Status = "processing", FilePath = filePath });
         }
     }
 }
