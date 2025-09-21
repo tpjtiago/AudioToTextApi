@@ -3,7 +3,6 @@ using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json;
 using Google.Cloud.PubSub.V1;
 using Google.Cloud.Storage.V1;
-using System.Diagnostics;
 
 namespace AudioToTextApi.Controllers
 {
@@ -29,58 +28,33 @@ namespace AudioToTextApi.Controllers
                 return BadRequest("Nenhum arquivo enviado.");
 
             var bucket = _config["Gcs:Bucket"];
-            var objectName = Guid.NewGuid() + ".flac";
+            var objectName = Guid.NewGuid() + Path.GetExtension(file.FileName);
 
-            // --- Caminhos temporários ---
-            var tempInput = Path.GetTempFileName() + Path.GetExtension(file.FileName);
-            var tempOutput = Path.GetTempFileName() + ".wav";
-
-            // --- Salva upload temporário ---
-            using (var fs = new FileStream(tempInput, FileMode.Create))
+            // 🚀 Carrega primeiro em memória para evitar travar o stream do ASP.NET
+            using (var memoryStream = new MemoryStream())
             {
-                await file.CopyToAsync(fs);
+                await file.CopyToAsync(memoryStream);
+                memoryStream.Position = 0;
+
+                await _storage.UploadObjectAsync(bucket, objectName, null, memoryStream);
             }
-
-
-            var ffmpeg = new ProcessStartInfo
-            {
-                FileName = @"C:\ffmpeg\bin\ffmpeg.exe",
-                Arguments = $"-y -i \"{tempInput}\" -ar 16000 -ac 1 -f wav \"{tempOutput}\"",
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            using (var process = Process.Start(ffmpeg))
-            {
-                string stderr = await process.StandardError.ReadToEndAsync();
-                await process.WaitForExitAsync();
-
-                if (process.ExitCode != 0)
-                {
-                    return StatusCode(500, $"Erro na conversão FFmpeg: {stderr}");
-                }
-            }
-
-            // --- Upload para GCS ---
-            using (var stream = System.IO.File.OpenRead(tempOutput))
-            {
-                await _storage.UploadObjectAsync(bucket, objectName, null, stream);
-            }
-
-            // --- Limpeza ---
-            System.IO.File.Delete(tempInput);
-            System.IO.File.Delete(tempOutput);
 
             var filePath = $"gs://{bucket}/{objectName}";
             var jobId = Guid.NewGuid().ToString();
 
-            // --- Publicação no Pub/Sub ---
-            var message = new { JobId = jobId, FilePath = filePath };
+            var message = new
+            {
+                JobId = jobId,
+                FilePath = filePath
+            };
+
             string json = JsonConvert.SerializeObject(message);
+
+            // 🚀 Publicação no Pub/Sub reaproveitando o _publisher injetado
             await _publisher.PublishAsync(ByteString.CopyFromUtf8(json));
 
-            return Ok(new { JobId = jobId, Status = "processing", FilePath = filePath });
+            return Ok(new { JobId = jobId, Status = "processing" });
         }
     }
 }
+

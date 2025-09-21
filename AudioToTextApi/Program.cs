@@ -1,10 +1,8 @@
 using AudioToTextApi.Background;
 using AudioToTextApi.Data;
 using Google.Cloud.PubSub.V1;
-using Microsoft.EntityFrameworkCore;
-using Google.Cloud.PubSub.V1;
 using Google.Cloud.Storage.V1;
-using Microsoft.Extensions.DependencyInjection;
+using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 

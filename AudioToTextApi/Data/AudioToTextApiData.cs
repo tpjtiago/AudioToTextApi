@@ -13,6 +13,8 @@ namespace AudioToTextApi.Data
         public string? Interpretation { get; set; }
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
         public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+        public double? AudioDurationSeconds { get; set; }
+        public double? ProcessingTimeSeconds { get; set; }
     }
 
     public class AppDbContext : DbContext

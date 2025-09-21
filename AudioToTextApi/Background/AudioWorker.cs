@@ -5,6 +5,7 @@ using Google.Cloud.Speech.V1;
 using Microsoft.EntityFrameworkCore;
 using Mscc.GenerativeAI;
 using Newtonsoft.Json;
+using System.Diagnostics;
 
 namespace AudioToTextApi.Background
 {
@@ -20,7 +21,7 @@ namespace AudioToTextApi.Background
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-        {
+        {   
             var projectId = _config["Gcp:ProjectId"];
             var subscriptionId = _config["Gcp:PubSubSubscription"];
 
@@ -33,6 +34,8 @@ namespace AudioToTextApi.Background
             {
                 var payload = JsonConvert.DeserializeObject<JobMessage>(msg.Data.ToStringUtf8());
 
+                var stopwatch = Stopwatch.StartNew();
+
                 Console.WriteLine($"📥 Recebi job {payload.JobId} para {payload.FilePath}");
 
                 // Usar scope para injetar DbContext
@@ -40,7 +43,9 @@ namespace AudioToTextApi.Background
                 var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
                 // Criar ou atualizar registro no banco
+
                 var jobEntity = await db.AudioJobs.FirstOrDefaultAsync(j => j.JobId == payload.JobId);
+
                 if (jobEntity == null)
                 {
                     jobEntity = new AudioJob
@@ -53,6 +58,7 @@ namespace AudioToTextApi.Background
                     };
                     db.AudioJobs.Add(jobEntity);
                     await db.SaveChangesAsync();
+
                 }
                 else
                 {
@@ -75,7 +81,7 @@ namespace AudioToTextApi.Background
                     });
 
                     var pollTask = longOp.PollUntilCompletedAsync(
-                                           new PollSettings(Expiration.FromTimeout(TimeSpan.FromMinutes(30)), TimeSpan.FromSeconds(15))
+                                           new PollSettings(Expiration.FromTimeout(TimeSpan.FromMinutes(15)), TimeSpan.FromSeconds(15))
                                        );
 
                     var cancelTask = Task.Delay(Timeout.Infinite, ct);
@@ -107,11 +113,14 @@ namespace AudioToTextApi.Background
                         $"Texto transcrito: {transcript}\nResuma e identifique a intenção principal."
                     );
 
+                    stopwatch.Stop();
+
                     // Atualiza banco com resultado
                     jobEntity.Status = "done";
                     jobEntity.Transcript = transcript;
                     jobEntity.Interpretation = geminiResponse.Text;
                     jobEntity.UpdatedAt = DateTime.UtcNow;
+                    jobEntity.ProcessingTimeSeconds = stopwatch.Elapsed.TotalSeconds;
                     await db.SaveChangesAsync();
 
                     Console.WriteLine($"✅ Job {payload.JobId} concluído.");
@@ -119,16 +128,20 @@ namespace AudioToTextApi.Background
                 }
                 catch (OperationCanceledException)
                 {
+                    stopwatch.Stop();
                     jobEntity.Status = "failed";
                     jobEntity.UpdatedAt = DateTime.UtcNow;
+                    jobEntity.ProcessingTimeSeconds = stopwatch.Elapsed.TotalSeconds;
                     await db.SaveChangesAsync();
                     return SubscriberClient.Reply.Nack;
                 }
                 catch (Exception ex)
                 {
+                    stopwatch.Stop();
                     Console.WriteLine($"❌ Erro no job {payload.JobId}: {ex.Message}");
                     jobEntity.Status = "failed";
                     jobEntity.UpdatedAt = DateTime.UtcNow;
+                    jobEntity.ProcessingTimeSeconds = stopwatch.Elapsed.TotalSeconds;
                     await db.SaveChangesAsync();
                     return SubscriberClient.Reply.Nack;
                 }
